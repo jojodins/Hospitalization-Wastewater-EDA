@@ -1,0 +1,246 @@
+---
+title: "Analysis of COVID-19 Hospitalizations and Wastewater Data"
+author: "Jordan Denz"
+date: "2024-03-05"
+output: 
+  html_document:
+    theme: united
+    toc: true
+    toc_float: true
+---
+
+# Introduction
+
+This analysis explores the trends in COVID-19 hospitalization rates alongside wastewater viral activity levels. The CDC currently provides data and visuals of these individually, but they exist in separate places and I essentially wanted to combine them in a novel approach to understanding the spread and impact of the virus. By examining these two datasets, I want to identify patterns that may not be evident when looking at traditional single indicators alone. This approach is particularly relevant as wastewater surveillance can offer early signs of COVID-19 outbreaks, providing a complementary view to hospitalization data. My hypothesis is that increases in viral loads in wastewater will precede or coincide with rises in hospitalization rates.
+
+I chose wastewater surveillance data because it tends to be extremely inclusive - it captures viral shedding from entire communities served by wastewater treatment facilities. It also captures data from asymptomatic individuals who might not seek testing, or from those who don't have access to testing or may not be willing to get tested or go to a hospital. It is an unbiased, population-wide indicator of the virus's presence.
+
+
+# Data Loading and Inspection
+
+I begin by loading necessary libraries and the datasets. Then, I inspect the initial few rows of each dataset to understand the structure.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(pander)
+
+# load data
+hospitalizations <- read.csv("Weekly_Rates_of_Laboratory-Confirmed_COVID-19_Hospitalizations_from_the_COVID-NET_Surveillance_System_20240224.csv")
+wastewater <- read.csv("NWSSRegionalLevel.csv")
+
+# inspecting the data
+head(wastewater)
+head(hospitalizations)
+
+sum(is.na(wastewater))
+sum(is.na(hospitalizations))
+
+# standardize dates
+wastewater$date <- ymd(wastewater$date)
+wastewater$date <- as.Date(wastewater$date)
+hospitalizations$date <- mdy_hms(hospitalizations$Week.ending.date)
+hospitalizations$date <- as.Date(hospitalizations$date)
+
+# exploring data
+summary(wastewater)
+summary(hospitalizations)
+```
+
+After loading the datasets, a preliminary inspection revealed several key points:
+
+- The `wastewater` dataset contains measurements from various regions, highlighting differences in SARS-CoV-2 levels over time. Notably, there are fluctuations that seem to align with known outbreak periods, suggesting a correlation with public health data.
+- The `hospitalizations` dataset shows the expected weekly variability in hospital rates, with peaks that may correlate with increases in wastewater viral levels.
+- Both datasets exhibit some missing values, particularly in the early months of the pandemic, underscoring the challenges of data collection during emergency situations.
+
+These observations set the stage for a deeper analysis, focusing on the relationship between these two critical health indicators.
+
+The `wastewater` dataset contains `r nrow(wastewater)` rows and `r ncol(wastewater)` columns. It primarily tracks wastewater viral activity levels across different regions over time.
+
+Similarly, the `hospitalizations` dataset includes `r nrow(hospitalizations)` rows and `r ncol(hospitalizations)` columns, listing weekly rates of laboratory-confirmed COVID-19 hospitalizations from the COVID-NET surveillance system.
+
+I've standardized the date formats across both datasets for consistency in preparation for plotting. I'll also filter out any values less than 1 for the hospitalizations dataset to prevent them from harshly skewing any averages.
+
+```{r}
+# filter out any values under 1 from hospitalization data
+hospitalizations <- filter(hospitalizations, Rate >= 1)
+```
+
+Now I'll group the hospitalization data by state and date, and remove "COVID-NET" from the states column since it's not relevant to my analysis.
+
+```{r}
+# aggregate hospitalization data
+hospital_aggregated <- hospitalizations %>%
+  group_by(State, date) %>%
+  summarize(Average_Rate = mean(Rate, na.rm = TRUE))
+
+head(hospital_aggregated)
+
+# filter out COVID-NET because it is not necessary for my analysis
+hospital_filtered <- hospital_aggregated %>%
+  filter(State !="COVID-NET")
+
+head(hospital_filtered)
+```
+
+Next I'm going to combine the data for each state so that there is only a single average national figure that corresponds to each reporting date.
+
+The connection between these datasets is the temporal dimension --- both track data over time, providing an opportunity to examine correlations between wastewater viral activity levels and COVID-19 hospitalization rates.
+
+```{r}
+# aggregate across all states for each date
+hospital_combined <- hospital_filtered %>%
+  group_by(date) %>%
+  summarise(national_hospitalization_average = mean(Average_Rate, na.rm = TRUE))
+
+head(hospital_combined)
+```
+
+Moving on to the wastewater data, I need to remove the date_period column since it doesn't contain any relevant information, then perfom an inner join to combine the national data we created from the hospitalization dataset. The inner join ensures non-matching values are excluded.
+
+```{r}
+# clean wastewater data
+wastewater <- select(wastewater, -date_period)
+
+# perform a join to match up national data from both datasets and rename columns for clarity
+joined_national_data <- inner_join(hospital_combined, wastewater, by = "date")
+joined_national_data <- select(joined_national_data, -Midwest, -Northeast, -South, -West)
+joined_national_data <- rename(joined_national_data, national_wastewater_level = National)
+
+head(joined_national_data)
+```
+
+# Data Analysis and Visualization
+
+My analysis includes plotting hospitalization rates and wastewater viral activity levels, and examining their distribution and relationship.
+
+## National Weekly Hospitalization Average
+
+```{r}
+ggplot(hospital_combined, aes(x = date, y = national_hospitalization_average)) +
+  geom_line(color = "red") +
+  labs(title = "National Weekly Hospitalization Average Over Time",
+       x = "Date",
+       y = "Average Hospitalization Rate") +
+  theme_minimal()
+```
+
+## National Weekly COVID Levels in Wastewater Over Time
+
+```{r}
+# line chart of national wastewater levels over time
+ggplot(joined_national_data, aes(x = date, y = national_wastewater_level)) +
+  geom_line(color = "blue") +
+  labs(title = "National Weekly COVID Levels in Wastewater Level Over Time",
+       x = "Date",
+       y = "Wastewater Level") +
+  theme_minimal()
+```
+
+## Experimenting With a Novel Chart Type
+
+This visualization layers hospitalization rates over categorized wastewater viral activity levels, using a color-coded geom_ribbon to represent the categories assigned by the CDC (ranging from "Minimal" to "Very High"). Although this isn't the prettiest or most effective chart, I think this offers a unique perspective on how fluctuations in viral activity levels in wastewater correspond with changes in hospitalization rates.
+
+```{r}
+# assigning CDC's categories to wastewater rate
+joined_national_data$wastewater_category <- cut(joined_national_data$national_wastewater_level,
+                                                breaks = c(-Inf, 1.5, 3, 4.5, 8, Inf),
+                                                labels = c("Minimal", "Low", "Moderate", "High", "Very High"))
+
+# playing with visual layering to plot both hospitalization rate with wastewater viral activity
+ggplot(joined_national_data, aes(x = date)) +
+  geom_line(aes(y = national_hospitalization_average, color = "Hospitalization Rate")) +
+  geom_ribbon(aes(ymin = 0, ymax = Inf, fill = wastewater_category), alpha = 0.3) +
+  scale_fill_manual(values = c("Minimal" = "green", "Low" = "yellow", "Moderate" = "orange", "High" = "red", "Very High" = "purple")) +
+  labs(title = "Hospitalization Rates with Wastewater Viral Activity Levels",
+       x = "Date", y = "Hospitalization Rate") +
+  theme_minimal() +
+  scale_color_manual(values = c("Hospitalization Rate" = "black"))
+```
+
+## Dual-Axis Chart
+
+The dual-axis chart allows for a direct comparison of hospitalization rates and wastewater viral activity levels on their original scales, with one axis for each variable. Since these two variables are measured with different scales, I wanted to experiment with scaling the wastewater up to align the lines more closely.
+
+```{r}
+# plotting a dual-axis chart to preserve original scales and compare trends
+ggplot() +
+  geom_line(data = hospital_combined, aes(x = date, y = national_hospitalization_average, colour = "Hospitalization")) +
+  geom_line(data = joined_national_data, aes(x = date, y = national_wastewater_level, colour = "Wastewater")) +
+  scale_y_continuous(name = "Hospitalization Rate", sec.axis = sec_axis(~ ., name = "Wastewater Viral Activity Level")) +
+  labs(title = "Hospitalization Rates and Wastewater Viral Activity Level Over Time") +
+  theme_minimal() +
+  scale_colour_manual(values = c("Hospitalization" = "red", "Wastewater" = "blue"))
+
+# experimenting with scaling the wastewater data for more accurate visual representation
+scaling_factor <- 2
+
+# plot
+ggplot() +
+  geom_line(data = hospital_combined, aes(x = date, y = national_hospitalization_average), color = "red") +
+  geom_line(data = joined_national_data, aes(x = date, y = national_wastewater_level * scaling_factor), color = "blue") +
+  scale_y_continuous(name = "Hospitalization Rate",
+                     sec.axis = sec_axis(~ . / scaling_factor, name = "Wastewater Viral Activity Level")) +
+  labs(title = "Hospitalization Rates and Adjusted Wastewater Viral Activity Level Over Time",
+       x = "Date") +
+  theme_minimal()
+```
+
+## Aggregated Data by Month for a Smoother Trend Line
+
+By aggregating data by month, this chart presents a smoother trend line that averages out the weekly fluctuations, providing a clearer view of the longer-term trends in both wastewater viral activity levels and hospitalization rates. 
+
+```{r}
+# aggregating data by month for a smoother trend line
+joined_national_data$date <- as.Date(joined_national_data$date)
+joined_national_data$month <- format(joined_national_data$date, "%Y-%m")
+
+monthly_data <- joined_national_data %>%
+  group_by(month) %>%
+  summarise(national_hospitalization_average = mean(national_hospitalization_average),
+            national_wastewater_level = mean(national_wastewater_level)) %>%
+  mutate(month = as.Date(paste0(month, "-01")))
+
+ggplot(monthly_data, aes(x = month)) +
+  geom_line(aes(y = national_hospitalization_average, color = "Hospitalization Rate")) +
+  geom_line(aes(y = national_wastewater_level, color = "Wastewater Level")) +
+  labs(title = "Monthly Averages of Wastewater Levels vs. Hospitalization Rates",
+       x = "Month", y = "Average Level") +
+  scale_color_manual(values = c("Hospitalization Rate" = "red", "Wastewater Level" = "blue")) +
+  theme_minimal()
+```
+
+# Exploring the Correlation
+
+I performed a Pearson's correlation test to understand the relationship between national wastewater levels and hospitalization rates.
+
+```{r}
+# experimenting with scatter plot and fitted regression line
+# performing a pearson's correlation test
+correlation <- cor.test(joined_national_data$national_hospitalization_average, joined_national_data$national_wastewater_level, method = "pearson")
+
+ggplot(joined_national_data, aes(x = national_wastewater_level, y = national_hospitalization_average)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = paste("Correlation between Wastewater Levels and Hospitalization Rates: r =", round(correlation$estimate, 2)),
+       x = "Wastewater Level", y = "Hospitalization Rate") +
+  theme_minimal()
+
+pander(correlation)
+```
+
+This analysis reveals a significant correlation between wastewater viral activity levels and COVID-19 hospitalization rates. Specifically, the Pearson's correlation test yielded a coefficient of `r round(correlation$estimate, 3)`, indicating a strong positive relationship. This suggests that as viral levels in wastewater increase, hospitalization rates tend to rise shortly thereafter.
+
+Additionally, further analysis could investigate the impact of vaccination campaigns and new COVID-19 variants on the relationship between wastewater viral levels and hospitalization rates.
+
+In conclusion, this analysis demonstrates the value of combining data sources to enhance our perspectives and understanding of public health challenges. 
+
+# Sources
+https://data.cdc.gov/Public-Health-Surveillance/Weekly-Rates-of-Laboratory-Confirmed-COVID-19-Hosp/twtx-bfcw/about_data
+
+https://www.cdc.gov/nwss/rv/COVID19-nationaltrend.html
+
+https://www.cdc.gov/wcms/vizdata/NCEZID_DIDRI/NWSSRegionalLevel.json
+
